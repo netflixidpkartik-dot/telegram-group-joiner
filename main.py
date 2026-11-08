@@ -163,7 +163,7 @@ async def main():
     logger.info(f"User account connected: {user_me.first_name} (+{user_me.phone}) ID: {user_me.id}")
     
     # Pre-seed initial links if storage is empty
-    if not storage.data["queue"] and not storage.data["joined_groups"]:
+    if not storage.data["queue"]:
         added = storage.add_to_queue(config.INITIAL_LINKS)
         logger.info(f"Pre-seeded {added} initial links into storage queue.")
         

@@ -61,24 +61,27 @@ class JoinerWorker:
 
     async def mute_peer(self, peer_entity):
         try:
-            await self.client(account.UpdateNotifySettingsRequest(
-                peer=InputNotifyPeer(peer_entity),
-                settings=InputPeerNotifySettings(
-                    mute_until=2147483647,
-                    silent=True,
-                    show_previews=False
-                )
-            ))
+            await asyncio.wait_for(
+                self.client(account.UpdateNotifySettingsRequest(
+                    peer=InputNotifyPeer(peer_entity),
+                    settings=InputPeerNotifySettings(
+                        mute_until=2147483647,
+                        silent=True,
+                        show_previews=False
+                    )
+                )),
+                timeout=8.0
+            )
             return True
         except Exception as e:
-            logger.debug(f"Failed to mute peer {peer_entity}: {e}")
+            logger.debug(f"Failed to mute peer: {e}")
             return False
 
     async def sync_existing_dialogs(self):
         """Scans existing groups in account and adds them to storage & grps folder"""
         await self.notify("🔄 Syncing existing dialogs in account...")
         try:
-            dialogs = await self.client.get_dialogs(limit=200)
+            dialogs = await asyncio.wait_for(self.client.get_dialogs(limit=50), timeout=15.0)
             count = 0
             for d in dialogs:
                 try:
@@ -88,12 +91,13 @@ class JoinerWorker:
                             if getattr(ent, 'broadcast', False) and not getattr(ent, 'megagroup', False):
                                 continue
                             acc_hash = getattr(ent, 'access_hash', 0)
-                            storage.record_joined(d.id, d.name, getattr(ent, 'username', ''), acc_hash)
+                            safe_name = str(d.name).encode('ascii', errors='ignore').decode('ascii') or f"Group_{d.id}"
+                            storage.record_joined(d.id, safe_name, getattr(ent, 'username', ''), acc_hash)
                             if d.input_entity:
                                 await self.mute_peer(d.input_entity)
                             count += 1
                 except Exception as de:
-                    logger.debug(f"Error checking dialog {d.name}: {de}")
+                    logger.debug(f"Error checking dialog: {de}")
             logger.info(f"Synced {count} existing groups from account.")
             await self.refresh_folder_and_link()
         except Exception as e:
@@ -110,11 +114,10 @@ class JoinerWorker:
                 acc_h = g.get("access_hash")
                 try:
                     if acc_h:
-                        # Extract channel ID if -100 format
                         raw_id = int(str(cid).replace("-100", "").replace("-", ""))
                         input_peers.append(InputPeerChannel(raw_id, int(acc_h)))
                     else:
-                        ent = await self.client.get_input_entity(cid)
+                        ent = await asyncio.wait_for(self.client.get_input_entity(cid), timeout=8.0)
                         input_peers.append(ent)
                 except Exception as pe:
                     logger.debug(f"Could not resolve input peer for {cid}: {pe}")
@@ -131,39 +134,67 @@ class JoinerWorker:
                 include_peers=input_peers,
                 has_my_invites=True
             )
-            await self.client(messages.UpdateDialogFilterRequest(id=config.FOLDER_ID, filter=f))
+            await asyncio.wait_for(
+                self.client(messages.UpdateDialogFilterRequest(id=config.FOLDER_ID, filter=f)),
+                timeout=12.0
+            )
             logger.info(f"Updated folder '{config.FOLDER_NAME}' with {len(input_peers)} peers.")
 
             # 2. Export / Update Chatlist Invite Link
             chatlist_filter = InputChatlistDialogFilter(filter_id=config.FOLDER_ID)
-            slug = storage.data.get("chatlist_slug", "")
-            url = ""
+            existing_invites = []
+            try:
+                inv_res = await asyncio.wait_for(
+                    self.client(chatlists.GetExportedInvitesRequest(chatlist=chatlist_filter)),
+                    timeout=10.0
+                )
+                existing_invites = getattr(inv_res, 'invites', [])
+            except Exception as ie:
+                logger.debug(f"Could not fetch existing invites: {ie}")
 
-            if slug:
+            url = ""
+            if existing_invites:
+                main_inv = existing_invites[0]
+                main_slug = main_inv.url.split('/')[-1]
+                # Cleanup surplus invites to avoid INVITES_TOO_MUCH
+                for extra in existing_invites[1:]:
+                    extra_slug = extra.url.split('/')[-1]
+                    try:
+                        await self.client(chatlists.DeleteExportedInviteRequest(chatlist=chatlist_filter, slug=extra_slug))
+                    except Exception:
+                        pass
+
                 try:
-                    res = await self.client(chatlists.EditExportedInviteRequest(
+                    res = await asyncio.wait_for(
+                        self.client(chatlists.EditExportedInviteRequest(
+                            chatlist=chatlist_filter,
+                            slug=main_slug,
+                            title=config.FOLDER_NAME,
+                            peers=input_peers
+                        )),
+                        timeout=12.0
+                    )
+                    url = getattr(res, 'url', main_inv.url)
+                    storage.set_folder_link(url, slug=main_slug)
+                    logger.info(f"Updated existing chatlist link: {url}")
+                except Exception as ee:
+                    logger.warning(f"Failed to edit invite {main_slug}: {ee}")
+                    url = main_inv.url
+                    storage.set_folder_link(url, slug=main_slug)
+            else:
+                res = await asyncio.wait_for(
+                    self.client(chatlists.ExportChatlistInviteRequest(
                         chatlist=chatlist_filter,
-                        slug=slug,
                         title=config.FOLDER_NAME,
                         peers=input_peers
-                    ))
-                    url = res.invite.url
-                    logger.info(f"Updated existing chatlist link: {url}")
-                except Exception as e:
-                    logger.warning(f"EditExportedInviteRequest failed: {e}. Re-exporting...")
-                    slug = ""
-
-            if not slug:
-                res = await self.client(chatlists.ExportChatlistInviteRequest(
-                    chatlist=chatlist_filter,
-                    title=config.FOLDER_NAME,
-                    peers=input_peers
-                ))
-                url = res.invite.url
+                    )),
+                    timeout=12.0
+                )
+                url = getattr(res, 'url', getattr(getattr(res, 'invite', None), 'url', ''))
                 new_slug = url.split('/')[-1]
                 storage.set_folder_link(url, slug=new_slug)
                 logger.info(f"Created new combined chatlist link: {url}")
-                await self.notify(f"🔗 <b>New Combined Folder Link Generated:</b>\n{url}")
+                await self.notify(f"🔗 <b>Combined Folder Link:</b>\n{url}")
 
             return url
         except Exception as e:
@@ -178,7 +209,7 @@ class JoinerWorker:
         # 1. Chatlist Folder
         if link_type == "addlist":
             try:
-                invite = await self.client(chatlists.CheckChatlistInviteRequest(slug=val))
+                invite = await asyncio.wait_for(self.client(chatlists.CheckChatlistInviteRequest(slug=val)), timeout=15.0)
                 if isinstance(invite, ChatlistInvite):
                     input_peers = []
                     chats = getattr(invite, 'chats', [])
@@ -188,7 +219,7 @@ class JoinerWorker:
                     
                     if input_peers:
                         try:
-                            await self.client(chatlists.JoinChatlistInviteRequest(slug=val, peers=input_peers))
+                            await asyncio.wait_for(self.client(chatlists.JoinChatlistInviteRequest(slug=val, peers=input_peers)), timeout=15.0)
                         except Exception as je:
                             logger.info(f"JoinChatlistInviteRequest notice: {je}")
 
@@ -197,7 +228,8 @@ class JoinerWorker:
                     for ch in chats:
                         if hasattr(ch, 'id'):
                             acc_h = getattr(ch, 'access_hash', 0)
-                            storage.record_joined(ch.id, getattr(ch, 'title', ''), getattr(ch, 'username', ''), acc_h)
+                            safe_ch_title = str(getattr(ch, 'title', '')).encode('ascii', errors='ignore').decode('ascii')
+                            storage.record_joined(ch.id, safe_ch_title, getattr(ch, 'username', ''), acc_h)
                             if hasattr(ch, 'access_hash'):
                                 await self.mute_peer(InputPeerChannel(ch.id, ch.access_hash))
                                 
@@ -214,14 +246,15 @@ class JoinerWorker:
         # 2. Private Invite Hash
         elif link_type == "invite_hash":
             try:
-                res = await self.client(messages.ImportChatInviteRequest(hash=val))
+                res = await asyncio.wait_for(self.client(messages.ImportChatInviteRequest(hash=val)), timeout=15.0)
                 chats = getattr(res, 'chats', [])
                 for ch in chats:
                     acc_h = getattr(ch, 'access_hash', 0)
-                    storage.record_joined(ch.id, getattr(ch, 'title', ''), getattr(ch, 'username', ''), acc_h)
-                    ent = await self.client.get_input_entity(ch)
+                    safe_ch_title = str(getattr(ch, 'title', '')).encode('ascii', errors='ignore').decode('ascii')
+                    storage.record_joined(ch.id, safe_ch_title, getattr(ch, 'username', ''), acc_h)
+                    ent = await asyncio.wait_for(self.client.get_input_entity(ch), timeout=8.0)
                     await self.mute_peer(ent)
-                    await self.notify(f"✅ Joined Private Group <b>{getattr(ch, 'title', '')}</b> & muted!")
+                    await self.notify(f"✅ Joined Private Group <b>{safe_ch_title}</b> & muted!")
                 return True
             except UserAlreadyParticipantError:
                 logger.info(f"Already in group with hash {val}")
@@ -238,11 +271,12 @@ class JoinerWorker:
         # 3. Public Username
         elif link_type == "username":
             try:
-                ent = await self.client.get_input_entity(val)
-                await self.client(channels.JoinChannelRequest(channel=ent))
-                full_ent = await self.client.get_entity(ent)
+                ent = await asyncio.wait_for(self.client.get_input_entity(val), timeout=10.0)
+                await asyncio.wait_for(self.client(channels.JoinChannelRequest(channel=ent)), timeout=15.0)
+                full_ent = await asyncio.wait_for(self.client.get_entity(ent), timeout=10.0)
                 acc_h = getattr(full_ent, 'access_hash', 0)
-                storage.record_joined(full_ent.id, getattr(full_ent, 'title', val), val, acc_h)
+                safe_title = str(getattr(full_ent, 'title', val)).encode('ascii', errors='ignore').decode('ascii')
+                storage.record_joined(full_ent.id, safe_title, val, acc_h)
                 await self.mute_peer(ent)
                 await self.notify(f"✅ Joined Public Group <b>@{val}</b> & muted!")
                 return True
@@ -272,11 +306,13 @@ class JoinerWorker:
         except Exception as se:
             logger.error(f"Startup dialog sync failed: {se}")
         
-        # Ensure INITIAL_LINKS are queued if queue is currently empty
-        if not storage.data["queue"] and not storage.data["joined_groups"]:
-            storage.add_to_queue(config.INITIAL_LINKS)
-            logger.info(f"Loaded {len(config.INITIAL_LINKS)} initial links into queue.")
+        # Ensure INITIAL_LINKS are queued if queue is empty
+        if not storage.data["queue"]:
+            added = storage.add_to_queue(config.INITIAL_LINKS)
+            if added:
+                logger.info(f"Loaded {added} initial links into queue.")
 
+        storage.set_status("Joiner engine active - Processing queued links...")
         cycle_count = 0
         while self.is_running:
             try:

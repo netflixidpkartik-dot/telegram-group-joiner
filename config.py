@@ -17,28 +17,10 @@ ADMIN_IDS = [
 DELAY_BETWEEN_JOINS_MIN = float(os.getenv("DELAY_MIN", "12.0"))
 DELAY_BETWEEN_JOINS_MAX = float(os.getenv("DELAY_MAX", "20.0"))
 
-# Pre-seeded master list combining previous folders/groups and all user links
+# Pre-seeded master list combining previous folders/groups and all clean groups
 INITIAL_LINKS = [
-    # --- Chatlist Folders ---
-    "https://t.me/addlist/mywhpaWqPdUzNmM1",
-    "https://t.me/addlist/voE24M2VWOlmZTE9",
-    "https://t.me/addlist/kIRqwsiLZuYwYWFl",
-    "https://t.me/addlist/sM-LHiXSXuliOWQ9",
-    "https://t.me/addlist/q7GiCGlGrCFlOWE1",
-    "https://t.me/addlist/3E1k_isug39lYjll",
-    "https://t.me/addlist/DFleWqL2ZQk1NTI1",
-    "https://t.me/addlist/jO2QkrokIYFlMTc1",
-    "https://t.me/addlist/-PtPlLB510A0Nzg1",
-    "https://t.me/addlist/0mKjm6wjrBc2MDE1",
-    "https://t.me/addlist/JDBp2nc1HmQ0Yzll",
-    "https://t.me/addlist/f-vuqbZS_gxlMzk1",
-    "https://t.me/addlist/AnObt20_yBIwMThl",
-    "https://t.me/addlist/Yd92oIEjvnswMzM1",
-    "https://t.me/addlist/1JOHGCSodFtkMWRl",
-    "https://t.me/addlist/ZHzqVvNzvTZkZWQ1",
-    "https://t.me/addlist/CaRXmXudpFoxY2U9",
-    "https://t.me/addlist/evwZ-xsVea4yNmQ1",
-    "https://t.me/addlist/GKnSP7hycVwyMjE1",  # Master folder from previous config
+    # --- Master Verified Folder (from adbot permanent config) ---
+    "https://t.me/addlist/GKnSP7hycVwyMjE1",
 
     # --- Private Invite Groups ---
     "https://t.me/+QJCv-28Fzs5lOWM1",

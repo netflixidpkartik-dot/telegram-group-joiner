@@ -4,12 +4,63 @@ import sys
 import time
 import signal
 import os
+import threading
+import http.server
+import socketserver
+import json
 
 # Set console output encoding
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 current_proc = None
 shutting_down = False
+
+# --- HTTP Healthcheck Server for Railway ---
+class HealthHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        state_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "joiner_state.json")
+        stats = {}
+        if os.path.exists(state_file):
+            try:
+                with open(state_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    stats = {
+                        "status": "online",
+                        "folder_name": "grps",
+                        "joined_count": len(data.get("joined_groups", {})),
+                        "queue_len": len(data.get("queue", [])),
+                        "failed_count": len(data.get("failed_groups", [])),
+                        "combined_folder_link": data.get("combined_folder_link", ""),
+                        "status_text": data.get("status_text", "")
+                    }
+            except Exception:
+                stats = {"status": "online"}
+        else:
+            stats = {"status": "online", "message": "Starting up..."}
+
+        body = json.dumps(stats, indent=2).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        pass  # Suppress health check access logs
+
+def start_health_server():
+    port = int(os.environ.get("PORT", 8080))
+    # Allow socket address reuse so restarts never crash with 'Address already in use'
+    socketserver.TCPServer.allow_reuse_address = True
+    try:
+        with socketserver.TCPServer(("0.0.0.0", port), HealthHandler) as httpd:
+            print(f"[SUPERVISOR] HTTP Healthcheck server listening on 0.0.0.0:{port}", flush=True)
+            httpd.serve_forever()
+    except Exception as e:
+        print(f"[SUPERVISOR] Health server warning: {e}", flush=True)
+
+# Start health check server in background daemon thread immediately
+threading.Thread(target=start_health_server, daemon=True).start()
 
 def handle_signal(sig, frame):
     global shutting_down, current_proc

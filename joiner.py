@@ -45,6 +45,27 @@ def parse_link_type(link_or_text):
         
     return "unknown", text
 
+def check_channel_restrictions(entity):
+    """
+    Checks if group restricts direct messaging, photos/media, or requires captcha (join_to_send).
+    Returns (is_restricted: bool, reason: str)
+    """
+    if not entity:
+        return False, ""
+    dbr = getattr(entity, 'default_banned_rights', None)
+    join_to_send = getattr(entity, 'join_to_send', False)
+    reasons = []
+    if join_to_send:
+        reasons.append("captcha/join_to_send")
+    if dbr:
+        if getattr(dbr, 'send_messages', False):
+            reasons.append("messages banned")
+        if getattr(dbr, 'send_media', False) or getattr(dbr, 'send_photos', False):
+            reasons.append("media/photos banned")
+    if reasons:
+        return True, ", ".join(reasons)
+    return False, ""
+
 class JoinerWorker:
     def __init__(self, user_client: TelegramClient, notifier_cb=None):
         self.client = user_client
@@ -77,11 +98,53 @@ class JoinerWorker:
             logger.debug(f"Failed to mute peer: {e}")
             return False
 
+    async def clean_account_and_folder(self):
+        """Scans dialogs, leaves any restricted channels, and updates the grps folder with clean channels"""
+        logger.info("Cleaning restricted groups from account & updating folder...")
+        try:
+            dialogs = await asyncio.wait_for(self.client.get_dialogs(limit=250), timeout=25.0)
+            clean_peers = []
+            restricted_ids = []
+            
+            for d in dialogs:
+                if not (d.is_group or d.is_channel):
+                    continue
+                ent = d.entity
+                if getattr(ent, 'broadcast', False) and not getattr(ent, 'megagroup', False):
+                    continue
+                
+                is_restr, reason = check_channel_restrictions(ent)
+                if is_restr:
+                    logger.info(f"Leaving restricted group: {d.id} ({d.name}) - {reason}")
+                    restricted_ids.append(d.id)
+                    try:
+                        await self.client(channels.LeaveChannelRequest(channel=d.input_entity))
+                        await asyncio.sleep(0.5)
+                    except Exception as le:
+                        logger.debug(f"Could not leave restricted group {d.id}: {le}")
+                else:
+                    acc_h = getattr(ent, 'access_hash', None)
+                    if acc_h and d.input_entity:
+                        raw_id = int(str(d.id).replace("-100", "").replace("-", ""))
+                        clean_peers.append(InputPeerChannel(raw_id, acc_h))
+                        storage.record_joined(d.id, str(d.name).encode('ascii', errors='replace').decode(),
+                                              getattr(ent, 'username', ''), acc_h)
+
+            if restricted_ids:
+                storage.remove_restricted_groups(restricted_ids)
+                await self.notify(f"🧹 <b>Removed {len(restricted_ids)} restricted groups</b> (captcha / no-media). Clean count: {len(clean_peers)}")
+            
+            await self.refresh_folder_and_link()
+            return len(clean_peers), len(restricted_ids)
+        except Exception as e:
+            logger.error(f"Error during clean_account_and_folder: {e}")
+            return 0, 0
+
     async def sync_existing_dialogs(self):
-        """Scans existing groups in account and adds them to storage & grps folder"""
+        """Scans existing groups in account and adds only clean ones to storage & grps folder"""
         await self.notify("🔄 Syncing existing dialogs in account...")
         try:
-            dialogs = await asyncio.wait_for(self.client.get_dialogs(limit=50), timeout=15.0)
+            dialogs = await asyncio.wait_for(self.client.get_dialogs(limit=100), timeout=20.0)
             count = 0
             for d in dialogs:
                 try:
@@ -89,6 +152,9 @@ class JoinerWorker:
                         ent = d.entity
                         if isinstance(ent, (Channel, Chat)):
                             if getattr(ent, 'broadcast', False) and not getattr(ent, 'megagroup', False):
+                                continue
+                            is_restr, reason = check_channel_restrictions(ent)
+                            if is_restr:
                                 continue
                             acc_hash = getattr(ent, 'access_hash', 0)
                             safe_name = str(d.name).encode('ascii', errors='ignore').decode('ascii') or f"Group_{d.id}"
@@ -98,38 +164,38 @@ class JoinerWorker:
                             count += 1
                 except Exception as de:
                     logger.debug(f"Error checking dialog: {de}")
-            logger.info(f"Synced {count} existing groups from account.")
+            logger.info(f"Synced {count} clean groups from account.")
             await self.refresh_folder_and_link()
         except Exception as e:
             logger.error(f"Error syncing existing dialogs: {e}")
 
     async def refresh_folder_and_link(self):
-        """Builds DialogFilterChatlist from LIVE account dialogs and exports/updates the shareable link"""
+        """Builds DialogFilterChatlist from LIVE clean dialogs and exports/updates the shareable link"""
         try:
-            # --- Get LIVE groups from account dialogs (source of truth) ---
             input_peers = []
-            live_peer_ids = set()
             try:
-                dialogs = await asyncio.wait_for(self.client.get_dialogs(limit=200), timeout=15.0)
+                dialogs = await asyncio.wait_for(self.client.get_dialogs(limit=250), timeout=20.0)
                 for d in dialogs:
                     if not (d.is_group or d.is_channel):
                         continue
                     ent = d.entity
-                    # Skip pure broadcast channels (not supergroups)
+                    # Skip broadcast channels
                     if getattr(ent, 'broadcast', False) and not getattr(ent, 'megagroup', False):
                         continue
+                    # Skip restricted channels (captcha, no messaging, no photos)
+                    is_restr, _ = check_channel_restrictions(ent)
+                    if is_restr:
+                        continue
+                        
                     acc_h = getattr(ent, 'access_hash', None)
                     if acc_h and d.input_entity:
                         raw_id = int(str(d.id).replace("-100", "").replace("-", ""))
                         input_peers.append(InputPeerChannel(raw_id, acc_h))
-                        live_peer_ids.add(d.id)
-                        # Also update storage with correct access hash
                         storage.record_joined(d.id, str(d.name).encode('ascii', errors='replace').decode(),
                                               getattr(ent, 'username', ''), acc_h)
-                logger.info(f"refresh_folder_and_link: got {len(input_peers)} live peers from account")
+                logger.info(f"refresh_folder_and_link: got {len(input_peers)} clean live peers from account")
             except Exception as de:
                 logger.warning(f"Could not get live dialogs, falling back to storage: {de}")
-                # Fallback: use storage
                 joined = list(storage.data["joined_groups"].values())
                 for g in joined[:100]:
                     cid = g["id"]
@@ -148,7 +214,7 @@ class JoinerWorker:
             input_peers = input_peers[:100]
 
             if not input_peers:
-                logger.info("No live groups in account yet. Folder update skipped.")
+                logger.info("No clean groups in account yet. Folder update skipped.")
                 return None
 
             # 1. Update the DialogFilterChatlist (folder)
@@ -163,7 +229,7 @@ class JoinerWorker:
                 self.client(messages.UpdateDialogFilterRequest(id=config.FOLDER_ID, filter=f)),
                 timeout=12.0
             )
-            logger.info(f"Updated folder '{config.FOLDER_NAME}' with {len(input_peers)} LIVE peers.")
+            logger.info(f"Updated folder '{config.FOLDER_NAME}' with {len(input_peers)} CLEAN peers.")
 
             # 2. Export / Update Chatlist Invite Link
             chatlist_filter = InputChatlistDialogFilter(filter_id=config.FOLDER_ID)
@@ -181,7 +247,6 @@ class JoinerWorker:
             if existing_invites:
                 main_inv = existing_invites[0]
                 main_slug = main_inv.url.split('/')[-1]
-                # Remove extra invites to avoid INVITES_TOO_MUCH
                 for extra in existing_invites[1:]:
                     try:
                         await self.client(chatlists.DeleteExportedInviteRequest(
@@ -239,7 +304,10 @@ class JoinerWorker:
                     chats = getattr(invite, 'chats', [])
                     for ch in chats:
                         if hasattr(ch, 'id') and hasattr(ch, 'access_hash'):
-                            input_peers.append(InputPeerChannel(ch.id, ch.access_hash))
+                            # Check restrictions
+                            is_restr, _ = check_channel_restrictions(ch)
+                            if not is_restr:
+                                input_peers.append(InputPeerChannel(ch.id, ch.access_hash))
                     
                     if input_peers:
                         try:
@@ -247,21 +315,25 @@ class JoinerWorker:
                         except Exception as je:
                             logger.info(f"JoinChatlistInviteRequest notice: {je}")
 
-                    # Record chats & mute them
                     title_str = getattr(invite.title, 'text', str(invite.title)) if hasattr(invite, 'title') else val
                     for ch in chats:
                         if hasattr(ch, 'id'):
+                            is_restr, _ = check_channel_restrictions(ch)
+                            if is_restr:
+                                continue
                             acc_h = getattr(ch, 'access_hash', 0)
                             safe_ch_title = str(getattr(ch, 'title', '')).encode('ascii', errors='ignore').decode('ascii')
                             storage.record_joined(ch.id, safe_ch_title, getattr(ch, 'username', ''), acc_h)
                             if hasattr(ch, 'access_hash'):
                                 await self.mute_peer(InputPeerChannel(ch.id, ch.access_hash))
                                 
-                    await self.notify(f"✅ Joined Chatlist Folder <b>{title_str}</b> ({len(chats)} groups) & muted!")
+                    await self.notify(f"✅ Joined Chatlist Folder <b>{title_str}</b> ({len(input_peers)} clean groups) & muted!")
                     return True
                 elif isinstance(invite, ChatlistInviteAlready):
                     await self.notify(f"ℹ️ Already joined Chatlist Folder: {val}")
                     return True
+            except FloodWaitError:
+                raise
             except Exception as e:
                 logger.warning(f"Failed to join chatlist {val}: {e}")
                 storage.record_failed(raw_item, str(e))
@@ -273,6 +345,19 @@ class JoinerWorker:
                 res = await asyncio.wait_for(self.client(messages.ImportChatInviteRequest(hash=val)), timeout=15.0)
                 chats = getattr(res, 'chats', [])
                 for ch in chats:
+                    # Check restrictions
+                    is_restr, restr_reason = check_channel_restrictions(ch)
+                    if is_restr:
+                        logger.warning(f"Private group {getattr(ch, 'title', val)} restricted ({restr_reason}). Leaving...")
+                        try:
+                            ch_ent = await self.client.get_input_entity(ch)
+                            await self.client(channels.LeaveChannelRequest(channel=ch_ent))
+                        except Exception:
+                            pass
+                        storage.record_failed(raw_item, f"Restricted: {restr_reason}")
+                        await self.notify(f"🚫 Skipped restricted group <b>{getattr(ch, 'title', val)}</b> ({restr_reason})")
+                        return False
+
                     acc_h = getattr(ch, 'access_hash', 0)
                     safe_ch_title = str(getattr(ch, 'title', '')).encode('ascii', errors='ignore').decode('ascii')
                     storage.record_joined(ch.id, safe_ch_title, getattr(ch, 'username', ''), acc_h)
@@ -280,6 +365,8 @@ class JoinerWorker:
                     await self.mute_peer(ent)
                     await self.notify(f"✅ Joined Private Group <b>{safe_ch_title}</b> & muted!")
                 return True
+            except FloodWaitError:
+                raise
             except UserAlreadyParticipantError:
                 logger.info(f"Already in group with hash {val}")
                 return True
@@ -298,12 +385,27 @@ class JoinerWorker:
                 ent = await asyncio.wait_for(self.client.get_input_entity(val), timeout=10.0)
                 await asyncio.wait_for(self.client(channels.JoinChannelRequest(channel=ent)), timeout=15.0)
                 full_ent = await asyncio.wait_for(self.client.get_entity(ent), timeout=10.0)
+                
+                # Check restrictions
+                is_restr, restr_reason = check_channel_restrictions(full_ent)
+                if is_restr:
+                    logger.warning(f"Group @{val} has restrictions: {restr_reason}. Leaving immediately...")
+                    try:
+                        await self.client(channels.LeaveChannelRequest(channel=ent))
+                    except Exception:
+                        pass
+                    storage.record_failed(raw_item, f"Restricted: {restr_reason}")
+                    await self.notify(f"🚫 Skipped restricted group <b>@{val}</b> ({restr_reason})")
+                    return False
+
                 acc_h = getattr(full_ent, 'access_hash', 0)
                 safe_title = str(getattr(full_ent, 'title', val)).encode('ascii', errors='ignore').decode('ascii')
                 storage.record_joined(full_ent.id, safe_title, val, acc_h)
                 await self.mute_peer(ent)
                 await self.notify(f"✅ Joined Public Group <b>@{val}</b> & muted!")
                 return True
+            except FloodWaitError:
+                raise
             except UserAlreadyParticipantError:
                 logger.info(f"Already in group @{val}")
                 return True
@@ -366,9 +468,12 @@ class JoinerWorker:
                 except FloodWaitError as e:
                     wait_sec = e.seconds + 5
                     storage.set_status(f"⚠️ Telegram FloodWait: Sleeping for {wait_sec}s...")
-                    await self.notify(f"⏳ <b>FloodWait Notice:</b> Telegram asked to wait {wait_sec}s. Sleeping before resuming...")
-                    # Re-queue the item
+                    await self.notify(f"⏳ <b>FloodWait Notice:</b> Telegram asked to wait {wait_sec}s ({wait_sec//60}m {wait_sec%60}s). Retrying automatically after sleep...")
+                    # Re-queue the item at index 0 so it retries after wait
                     storage.data["queue"].insert(0, item)
+                    if item in storage.data["processed"]:
+                        storage.data["processed"].remove(item)
+                    storage.save()
                     await asyncio.sleep(wait_sec)
                 except Exception as e:
                     logger.error(f"Unexpected error processing {item}: {e}")

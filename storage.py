@@ -45,12 +45,37 @@ class Storage:
         added = 0
         with _lock:
             for l in links:
-                l_clean = l.strip()
+                l_clean = str(l).strip()
                 if l_clean and l_clean not in self.data["processed"] and l_clean not in self.data["queue"]:
                     self.data["queue"].append(l_clean)
                     added += 1
         if added > 0:
             self.save()
+        return added
+
+    def requeue_failed(self, links=None):
+        """Removes links from processed and failed_groups, re-adding them to queue"""
+        added = 0
+        with _lock:
+            if links is None:
+                # Requeue all from failed_groups
+                failed_items = [f.get("link") for f in self.data.get("failed_groups", []) if f.get("link")]
+                to_requeue = list(dict.fromkeys(failed_items))
+                self.data["failed_groups"] = []
+            else:
+                to_requeue = [str(l).strip() for l in links if str(l).strip()]
+                # Remove matched from failed_groups
+                req_set = set(to_requeue)
+                self.data["failed_groups"] = [f for f in self.data["failed_groups"] if f.get("link") not in req_set]
+
+            for l in to_requeue:
+                while l in self.data["processed"]:
+                    self.data["processed"].remove(l)
+                if l not in self.data["queue"]:
+                    self.data["queue"].append(l)
+                    added += 1
+            if added > 0 or links is None:
+                self.save()
         return added
 
     def pop_queue(self):
@@ -71,7 +96,25 @@ class Storage:
                 "access_hash": access_hash,
                 "joined_at": time.strftime("%Y-%m-%d %H:%M:%S")
             }
+            # Clean from failed if present
+            if username:
+                u_str = f"@{username}".lower()
+                self.data["failed_groups"] = [
+                    f for f in self.data["failed_groups"]
+                    if u_str not in f.get("link", "").lower()
+                ]
             self.save()
+
+    def remove_restricted_groups(self, group_ids):
+        with _lock:
+            changed = False
+            for gid in group_ids:
+                s_gid = str(gid)
+                if s_gid in self.data["joined_groups"]:
+                    del self.data["joined_groups"][s_gid]
+                    changed = True
+            if changed:
+                self.save()
 
     def record_failed(self, link, error):
         with _lock:

@@ -12,8 +12,7 @@ from telethon.tl.types import (
 )
 from telethon.errors import (
     FloodWaitError, UserAlreadyParticipantError, InviteHashExpiredError,
-    InviteHashInvalidError, ChannelPrivateError, InviteRequestSentError,
-    ChatlistExcludeInvalidError
+    InviteHashInvalidError, ChannelPrivateError, InviteRequestSentError
 )
 import config
 from storage import storage

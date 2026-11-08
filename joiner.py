@@ -75,21 +75,24 @@ class JoinerWorker:
 
     async def sync_existing_dialogs(self):
         """Scans existing groups in account and adds them to storage & grps folder"""
-        self.notify("🔄 Syncing existing dialogs in account...")
+        await self.notify("🔄 Syncing existing dialogs in account...")
         try:
             dialogs = await self.client.get_dialogs(limit=200)
             count = 0
             for d in dialogs:
-                if d.is_group or d.is_channel:
-                    ent = d.entity
-                    if isinstance(ent, (Channel, Chat)):
-                        # Skip read-only broadcast channels if desired, but keep supergroups
-                        if getattr(ent, 'broadcast', False) and not getattr(ent, 'megagroup', False):
-                            continue
-                        acc_hash = getattr(ent, 'access_hash', 0)
-                        storage.record_joined(d.id, d.name, getattr(ent, 'username', ''), acc_hash)
-                        await self.mute_peer(await self.client.get_input_entity(d.entity))
-                        count += 1
+                try:
+                    if d.is_group or d.is_channel:
+                        ent = d.entity
+                        if isinstance(ent, (Channel, Chat)):
+                            if getattr(ent, 'broadcast', False) and not getattr(ent, 'megagroup', False):
+                                continue
+                            acc_hash = getattr(ent, 'access_hash', 0)
+                            storage.record_joined(d.id, d.name, getattr(ent, 'username', ''), acc_hash)
+                            if d.input_entity:
+                                await self.mute_peer(d.input_entity)
+                            count += 1
+                except Exception as de:
+                    logger.debug(f"Error checking dialog {d.name}: {de}")
             logger.info(f"Synced {count} existing groups from account.")
             await self.refresh_folder_and_link()
         except Exception as e:
@@ -103,11 +106,17 @@ class JoinerWorker:
             # Telegram non-premium chatlist limit is 100 peers
             for g in joined[:100]:
                 cid = g["id"]
+                acc_h = g.get("access_hash")
                 try:
-                    ent = await self.client.get_input_entity(cid)
-                    input_peers.append(ent)
-                except Exception:
-                    pass
+                    if acc_h:
+                        # Extract channel ID if -100 format
+                        raw_id = int(str(cid).replace("-100", "").replace("-", ""))
+                        input_peers.append(InputPeerChannel(raw_id, int(acc_h)))
+                    else:
+                        ent = await self.client.get_input_entity(cid)
+                        input_peers.append(ent)
+                except Exception as pe:
+                    logger.debug(f"Could not resolve input peer for {cid}: {pe}")
 
             if not input_peers:
                 logger.info("No input peers available to create chatlist yet.")

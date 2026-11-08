@@ -25,7 +25,7 @@ user_client = TelegramClient(StringSession(config.SESSION_STRING), config.API_ID
 async def send_admin_notification(text):
     for admin_id in config.ADMIN_IDS:
         try:
-            await bot_client.send_message(admin_id, text, parse_mode="html")
+            await asyncio.wait_for(bot_client.send_message(admin_id, text, parse_mode="html"), timeout=3.0)
         except Exception:
             pass
 

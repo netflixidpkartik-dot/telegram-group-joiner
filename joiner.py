@@ -104,29 +104,54 @@ class JoinerWorker:
             logger.error(f"Error syncing existing dialogs: {e}")
 
     async def refresh_folder_and_link(self):
-        """Builds DialogFilterChatlist and exports/updates the shareable link"""
+        """Builds DialogFilterChatlist from LIVE account dialogs and exports/updates the shareable link"""
         try:
+            # --- Get LIVE groups from account dialogs (source of truth) ---
             input_peers = []
-            joined = list(storage.data["joined_groups"].values())
-            # Telegram non-premium chatlist limit is 100 peers
-            for g in joined[:100]:
-                cid = g["id"]
-                acc_h = g.get("access_hash")
-                try:
-                    if acc_h:
-                        raw_id = int(str(cid).replace("-100", "").replace("-", ""))
-                        input_peers.append(InputPeerChannel(raw_id, int(acc_h)))
-                    else:
-                        ent = await asyncio.wait_for(self.client.get_input_entity(cid), timeout=8.0)
-                        input_peers.append(ent)
-                except Exception as pe:
-                    logger.debug(f"Could not resolve input peer for {cid}: {pe}")
+            live_peer_ids = set()
+            try:
+                dialogs = await asyncio.wait_for(self.client.get_dialogs(limit=200), timeout=15.0)
+                for d in dialogs:
+                    if not (d.is_group or d.is_channel):
+                        continue
+                    ent = d.entity
+                    # Skip pure broadcast channels (not supergroups)
+                    if getattr(ent, 'broadcast', False) and not getattr(ent, 'megagroup', False):
+                        continue
+                    acc_h = getattr(ent, 'access_hash', None)
+                    if acc_h and d.input_entity:
+                        raw_id = int(str(d.id).replace("-100", "").replace("-", ""))
+                        input_peers.append(InputPeerChannel(raw_id, acc_h))
+                        live_peer_ids.add(d.id)
+                        # Also update storage with correct access hash
+                        storage.record_joined(d.id, str(d.name).encode('ascii', errors='replace').decode(),
+                                              getattr(ent, 'username', ''), acc_h)
+                logger.info(f"refresh_folder_and_link: got {len(input_peers)} live peers from account")
+            except Exception as de:
+                logger.warning(f"Could not get live dialogs, falling back to storage: {de}")
+                # Fallback: use storage
+                joined = list(storage.data["joined_groups"].values())
+                for g in joined[:100]:
+                    cid = g["id"]
+                    acc_h = g.get("access_hash")
+                    try:
+                        if acc_h:
+                            raw_id = int(str(cid).replace("-100", "").replace("-", ""))
+                            input_peers.append(InputPeerChannel(raw_id, int(acc_h)))
+                        else:
+                            ent = await asyncio.wait_for(self.client.get_input_entity(cid), timeout=8.0)
+                            input_peers.append(ent)
+                    except Exception as pe:
+                        logger.debug(f"Could not resolve input peer for {cid}: {pe}")
+
+            # Telegram non-premium chatlist hard limit: 100 peers
+            input_peers = input_peers[:100]
 
             if not input_peers:
-                logger.info("No input peers available to create chatlist yet.")
+                logger.info("No live groups in account yet. Folder update skipped.")
                 return None
 
-            # 1. Update DialogFilterChatlist
+            # 1. Update the DialogFilterChatlist (folder)
             f = DialogFilterChatlist(
                 id=config.FOLDER_ID,
                 title=TextWithEntities(text=config.FOLDER_NAME, entities=[]),
@@ -138,7 +163,7 @@ class JoinerWorker:
                 self.client(messages.UpdateDialogFilterRequest(id=config.FOLDER_ID, filter=f)),
                 timeout=12.0
             )
-            logger.info(f"Updated folder '{config.FOLDER_NAME}' with {len(input_peers)} peers.")
+            logger.info(f"Updated folder '{config.FOLDER_NAME}' with {len(input_peers)} LIVE peers.")
 
             # 2. Export / Update Chatlist Invite Link
             chatlist_filter = InputChatlistDialogFilter(filter_id=config.FOLDER_ID)
@@ -156,14 +181,13 @@ class JoinerWorker:
             if existing_invites:
                 main_inv = existing_invites[0]
                 main_slug = main_inv.url.split('/')[-1]
-                # Cleanup surplus invites to avoid INVITES_TOO_MUCH
+                # Remove extra invites to avoid INVITES_TOO_MUCH
                 for extra in existing_invites[1:]:
-                    extra_slug = extra.url.split('/')[-1]
                     try:
-                        await self.client(chatlists.DeleteExportedInviteRequest(chatlist=chatlist_filter, slug=extra_slug))
+                        await self.client(chatlists.DeleteExportedInviteRequest(
+                            chatlist=chatlist_filter, slug=extra.url.split('/')[-1]))
                     except Exception:
                         pass
-
                 try:
                     res = await asyncio.wait_for(
                         self.client(chatlists.EditExportedInviteRequest(
@@ -176,9 +200,9 @@ class JoinerWorker:
                     )
                     url = getattr(res, 'url', main_inv.url)
                     storage.set_folder_link(url, slug=main_slug)
-                    logger.info(f"Updated existing chatlist link: {url}")
+                    logger.info(f"Updated chatlist invite link: {url} ({len(input_peers)} peers)")
                 except Exception as ee:
-                    logger.warning(f"Failed to edit invite {main_slug}: {ee}")
+                    logger.warning(f"EditExportedInvite failed: {ee}. Using existing URL.")
                     url = main_inv.url
                     storage.set_folder_link(url, slug=main_slug)
             else:
@@ -193,7 +217,7 @@ class JoinerWorker:
                 url = getattr(res, 'url', getattr(getattr(res, 'invite', None), 'url', ''))
                 new_slug = url.split('/')[-1]
                 storage.set_folder_link(url, slug=new_slug)
-                logger.info(f"Created new combined chatlist link: {url}")
+                logger.info(f"Created new chatlist invite link: {url}")
                 await self.notify(f"🔗 <b>Combined Folder Link:</b>\n{url}")
 
             return url

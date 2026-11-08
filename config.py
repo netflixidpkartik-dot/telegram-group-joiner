@@ -2,7 +2,7 @@ import os
 
 API_ID = int(os.getenv("API_ID", "35773395"))
 API_HASH = os.getenv("API_HASH", "bbc39743d27f40b171ce2792808911b4")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "9149592785:AAH2bNSocu9y8TdI50Go4VqnMEpYuxT9-Ag")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "9267137282:AAGrYbo1SlRbv16aCDevoJUczK2owpHpIGc")
 SESSION_STRING = os.getenv("SESSION_STRING", "1BVtsOG8Bu2JJT1whAS0zJYXkOVdfcAC2q-jy2rZqfZkk2VE_ngmraYnd-f4K0VIm657dtul1_ri5flsCuCcZahH1tS02w2LnpT2GRwzbm5UkzFHrc0zP0tsTD-NXB1BMMO_SKAMh-bmqIlfgzEFefZH3i9Kb4D6uDTysLU-wjgHotZLRHNDHOy6dTQtnO-HoH18bXJKLCZdObzJGQc1Ljv1DZ6zzZ7YkLo4GYxz-jLOaEdTi_FcftQFD9prB4lG0Z3KGlrsi4Icx4tkmhbTdgpF1i52Md20MmaXAJvO6EPeV-6laasgm_T6YeAxf1CesmueL7s8z_-pzFo_mfvJVkknZ9ocjBrM=")
 
 FOLDER_NAME = os.getenv("FOLDER_NAME", "grps")

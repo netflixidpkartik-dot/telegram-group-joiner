@@ -4,7 +4,7 @@ import threading
 import time
 
 DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "joiner_state.json")
-_lock = threading.Lock()
+_lock = threading.RLock()
 
 class Storage:
     def __init__(self, filepath=DATA_FILE):

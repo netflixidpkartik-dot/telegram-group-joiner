@@ -55,9 +55,9 @@ class JoinerWorker:
         logger.info(message)
         if self.notifier_cb:
             try:
-                await self.notifier_cb(message)
+                asyncio.create_task(self.notifier_cb(message))
             except Exception as e:
-                logger.error(f"Error calling notifier_cb: {e}")
+                logger.error(f"Error dispatching notifier_cb: {e}")
 
     async def mute_peer(self, peer_entity):
         try:
@@ -267,7 +267,10 @@ class JoinerWorker:
 
     async def run_loop(self):
         """Continuously pulls from queue, joins group, mutes, and periodically updates folder"""
-        await self.sync_existing_dialogs()
+        try:
+            await self.sync_existing_dialogs()
+        except Exception as se:
+            logger.error(f"Startup dialog sync failed: {se}")
         
         # Ensure INITIAL_LINKS are queued if queue is currently empty
         if not storage.data["queue"] and not storage.data["joined_groups"]:
@@ -276,31 +279,38 @@ class JoinerWorker:
 
         cycle_count = 0
         while self.is_running:
-            item = storage.pop_queue()
-            if not item:
-                storage.set_status("Idle - Queue completed! Waiting for new links.")
-                await asyncio.sleep(5)
-                continue
-
             try:
-                await self.process_item(item)
-                cycle_count += 1
+                item = storage.pop_queue()
+                if not item:
+                    storage.set_status("Idle - Queue completed! Waiting for new links.")
+                    await asyncio.sleep(5)
+                    continue
 
-                # Refresh folder and combined chatlist link every 5 items or when queue is empty
-                if cycle_count % 5 == 0 or len(storage.data["queue"]) == 0:
-                    await self.refresh_folder_and_link()
+                try:
+                    await self.process_item(item)
+                    cycle_count += 1
 
-                delay = random.uniform(config.DELAY_BETWEEN_JOINS_MIN, config.DELAY_BETWEEN_JOINS_MAX)
-                storage.set_status(f"Safe sleep for {delay:.1f}s...")
-                await asyncio.sleep(delay)
+                    # Refresh folder and combined chatlist link every 5 items or when queue is empty
+                    if cycle_count % 5 == 0 or len(storage.data["queue"]) == 0:
+                        try:
+                            await self.refresh_folder_and_link()
+                        except Exception as re:
+                            logger.error(f"Error during periodic refresh_folder_and_link: {re}")
 
-            except FloodWaitError as e:
-                wait_sec = e.seconds + 5
-                storage.set_status(f"⚠️ Telegram FloodWait: Sleeping for {wait_sec}s...")
-                await self.notify(f"⏳ <b>FloodWait Notice:</b> Telegram asked to wait {wait_sec}s. Sleeping before resuming...")
-                await asyncio.sleep(wait_sec)
-                # Re-queue the item
-                storage.data["queue"].insert(0, item)
-            except Exception as e:
-                logger.error(f"Unexpected error processing {item}: {e}")
+                    delay = random.uniform(config.DELAY_BETWEEN_JOINS_MIN, config.DELAY_BETWEEN_JOINS_MAX)
+                    storage.set_status(f"Safe sleep for {delay:.1f}s...")
+                    await asyncio.sleep(delay)
+
+                except FloodWaitError as e:
+                    wait_sec = e.seconds + 5
+                    storage.set_status(f"⚠️ Telegram FloodWait: Sleeping for {wait_sec}s...")
+                    await self.notify(f"⏳ <b>FloodWait Notice:</b> Telegram asked to wait {wait_sec}s. Sleeping before resuming...")
+                    # Re-queue the item
+                    storage.data["queue"].insert(0, item)
+                    await asyncio.sleep(wait_sec)
+                except Exception as e:
+                    logger.error(f"Unexpected error processing {item}: {e}")
+                    await asyncio.sleep(5)
+            except Exception as outer_err:
+                logger.error(f"Unexpected loop exception: {outer_err}")
                 await asyncio.sleep(5)

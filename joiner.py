@@ -301,10 +301,7 @@ class JoinerWorker:
 
     async def run_loop(self):
         """Continuously pulls from queue, joins group, mutes, and periodically updates folder"""
-        try:
-            await self.sync_existing_dialogs()
-        except Exception as se:
-            logger.error(f"Startup dialog sync failed: {se}")
+        logger.info("JoinerEngine loop initiated.")
         
         # Ensure INITIAL_LINKS are queued if queue is empty
         if not storage.data["queue"]:
@@ -313,6 +310,11 @@ class JoinerWorker:
                 logger.info(f"Loaded {added} initial links into queue.")
 
         storage.set_status("Joiner engine active - Processing queued links...")
+        logger.info(f"Joiner engine active. Queue size: {len(storage.data['queue'])}")
+
+        # Launch dialog sync in background so queue processing starts immediately without blocking
+        asyncio.create_task(self.sync_existing_dialogs())
+
         cycle_count = 0
         while self.is_running:
             try:

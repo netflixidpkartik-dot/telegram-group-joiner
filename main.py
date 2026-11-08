@@ -3,6 +3,10 @@ import logging
 import os
 import re
 import sys
+import json
+import threading
+import http.server
+import socketserver
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.custom import Button
@@ -19,6 +23,34 @@ logging.basicConfig(
     stream=sys.stdout
 )
 logger = logging.getLogger("Main")
+
+# --- Embedded HTTP Health Server for Railway ---
+class HealthHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        stats = storage.get_stats()
+        stats["status"] = "online"
+        stats["folder_name"] = config.FOLDER_NAME
+        body = json.dumps(stats, indent=2).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        pass
+
+def start_health_server():
+    port = int(os.environ.get("PORT", 8080))
+    socketserver.TCPServer.allow_reuse_address = True
+    try:
+        with socketserver.TCPServer(("0.0.0.0", port), HealthHandler) as httpd:
+            logger.info(f"Railway HTTP Health Server listening on 0.0.0.0:{port}")
+            httpd.serve_forever()
+    except Exception as e:
+        logger.error(f"Health server error: {e}")
+
+threading.Thread(target=start_health_server, daemon=True).start()
 
 bot_client = TelegramClient("bot_session", config.API_ID, config.API_HASH)
 user_client = TelegramClient(StringSession(config.SESSION_STRING), config.API_ID, config.API_HASH)

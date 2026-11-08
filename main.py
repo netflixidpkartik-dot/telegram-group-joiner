@@ -15,7 +15,8 @@ sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
+    level=logging.INFO,
+    stream=sys.stdout
 )
 logger = logging.getLogger("Main")
 

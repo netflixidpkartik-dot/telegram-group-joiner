@@ -10,6 +10,7 @@ from telethon.tl.types import (
     InputNotifyPeer, InputPeerNotifySettings, InputPeerChannel, InputPeerChat,
     PeerChannel, PeerChat, Channel, Chat
 )
+from telethon.tl.types.chatlists import ChatlistInvite, ChatlistInviteAlready
 from telethon.errors import (
     FloodWaitError, UserAlreadyParticipantError, InviteHashExpiredError,
     InviteHashInvalidError, ChannelPrivateError, InviteRequestSentError
@@ -178,25 +179,31 @@ class JoinerWorker:
         if link_type == "addlist":
             try:
                 invite = await self.client(chatlists.CheckChatlistInviteRequest(slug=val))
-                if isinstance(invite, chatlists.tl.types.chatlists.ChatlistInvite):
-                    missing = getattr(invite, 'missing_peers', []) or getattr(invite, 'peers', [])
-                    if missing:
-                        await self.client(chatlists.JoinChatlistInviteRequest(slug=val, peers=missing))
-                    
-                    # Mute and record all chats in folder
+                if isinstance(invite, ChatlistInvite):
+                    input_peers = []
                     chats = getattr(invite, 'chats', [])
+                    for ch in chats:
+                        if hasattr(ch, 'id') and hasattr(ch, 'access_hash'):
+                            input_peers.append(InputPeerChannel(ch.id, ch.access_hash))
+                    
+                    if input_peers:
+                        try:
+                            await self.client(chatlists.JoinChatlistInviteRequest(slug=val, peers=input_peers))
+                        except Exception as je:
+                            logger.info(f"JoinChatlistInviteRequest notice: {je}")
+
+                    # Record chats & mute them
+                    title_str = getattr(invite.title, 'text', str(invite.title)) if hasattr(invite, 'title') else val
                     for ch in chats:
                         if hasattr(ch, 'id'):
                             acc_h = getattr(ch, 'access_hash', 0)
                             storage.record_joined(ch.id, getattr(ch, 'title', ''), getattr(ch, 'username', ''), acc_h)
-                            try:
-                                ent = await self.client.get_input_entity(ch)
-                                await self.mute_peer(ent)
-                            except Exception:
-                                pass
-                    await self.notify(f"✅ Joined Chatlist Folder <b>{getattr(invite, 'title', val)}</b> ({len(chats)} groups) & muted!")
+                            if hasattr(ch, 'access_hash'):
+                                await self.mute_peer(InputPeerChannel(ch.id, ch.access_hash))
+                                
+                    await self.notify(f"✅ Joined Chatlist Folder <b>{title_str}</b> ({len(chats)} groups) & muted!")
                     return True
-                elif isinstance(invite, chatlists.tl.types.chatlists.ChatlistInviteAlready):
+                elif isinstance(invite, ChatlistInviteAlready):
                     await self.notify(f"ℹ️ Already joined Chatlist Folder: {val}")
                     return True
             except Exception as e:
